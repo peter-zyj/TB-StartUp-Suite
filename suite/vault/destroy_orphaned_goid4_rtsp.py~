@@ -1,0 +1,179 @@
+#!/usr/bin/env python
+import os,sys
+import time
+import socket
+import fcntl
+import struct
+import pexpect
+
+#UPD
+
+########SSH logon stuff############
+default_passwd = "rootroot"
+prompt_firstlogin = "Are you sure you want to continue connecting \(yes/no\)\?"
+prompt_passwd = "root@.*'s password:"
+prompt_logined = "\[root@.*\]#"
+
+def Standard_Reply(ssh,xIP):
+    try:
+        #ssh = pexpect.spawn('ssh root@%s' % IP)
+        result = ssh.expect([prompt_firstlogin, prompt_passwd, prompt_logined, pexpect.TIMEOUT],timeout=10)
+        #ssh.logfile = sys.stdout                                            # printout in real time
+        ssh.logfile = None
+        
+        if result == 0:
+          ssh.sendline('yes')
+          ssh.expect(prompt_passwd)
+          ssh.sendline(default_passwd)
+          ssh.expect(prompt_logined )
+        elif result == 1:
+          ssh.sendline(default_passwd)
+          ssh.expect(prompt_logined)
+        elif result == 2:
+          pass
+        elif result == 3:
+          print "ssh to %s timeout" %xIP
+        return ssh
+    except:
+        print 'Mismatch BTW default expect!!'
+        return ssh
+        sys.exit(0)
+
+def get_ip_address(ifname):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return socket.inet_ntoa(fcntl.ioctl(
+        s.fileno(),
+        0x8915,  # SIOCGIFADDR
+        struct.pack('256s', ifname[:15])
+    )[20:24])
+
+def execute(IP,action):    
+    date = time.strftime("%Y%m%d", time.localtime())
+    T_time = time.strftime("%H:%M:%S", time.localtime())
+    
+    localPWD = os.getcwd()
+    dir = "%s/%s/" % (localPWD,date)
+    subdir = "%s%s/" % (dir,T_time)
+    
+    if os.path.exists(dir) != True:
+        os.mkdir(dir)
+
+    os.mkdir(subdir)
+    os.chdir(subdir)
+
+    ########command assistant stuff####    
+    logfn = "/arroyo/log/serverinfo.log.%s" % date;
+    localfn = "%s/object.local" % subdir
+    dbfn = "/home/isa/bss/database/ctnobj.lst"
+    localdb = "%s/db.local" % subdir
+    LocalIP = get_ip_address('eth0')
+    ###################################
+    
+    cmd1 = 'rm -rf %s' % logfn
+    cmd2 = 'echo 1 > /proc/calypso/test/reopen_logfiles'
+    cmd3 = 'echo 2 > /proc/calypso/tunables/cm_logserverinfo'
+    cmd4 = 'su - isa -c "cd bss/database/; ./dumpctn > /dev/null"'
+    time.sleep(10)
+    
+    cmd5 = 'cp %s %s' % (logfn,localfn)
+    cmd6 = 'cp %s %s' % (dbfn,localdb)
+
+    os.popen(cmd1)
+    os.popen(cmd2)
+    os.popen(cmd3)
+    os.popen(cmd4)
+    ######other nodes handling begin#######
+    for x in IP:
+        if x == LocalIP:
+            continue
+        else:
+            try:
+                ssh = pexpect.spawn('ssh root@%s' % x)
+                Standard_Reply(ssh,x)
+            except:
+                print "ssh to %s error: " % x + ssh.before[:-1]
+                sys.exit(1)
+            
+            
+            ssh.sendline('rm -rf %s' % logfn)
+            ssh.expect(prompt_logined)
+    
+            ssh.sendline('echo 1 > /proc/calypso/test/reopen_logfiles')
+            ssh.expect(prompt_logined)
+    	    
+            ssh.sendline('echo 2 > /proc/calypso/tunables/cm_logserverinfo')
+            ssh.expect(prompt_logined)
+            time.sleep(10)
+            
+            try:
+                ssh.sendline('scp %s root@%s:%s%s%s' % (logfn,LocalIP,subdir,'object',x))
+                Standard_Reply(ssh,x)
+            except:
+		print "debug: scp %s root@%s:%s%s%s"  % (logfn,LocalIP,subdir,'object',x)
+                print "SCP to %s error: " % x + ssh.before[:-1]
+                sys.exit(1)
+    
+            ssh.sendline("su - isa -c 'cd Berkeley'")
+            ssh.expect(prompt_logined)
+            
+            ssh.sendline('./dumpctn > /dev/null')
+            ssh.expect(prompt_logined)
+    
+            try:
+                ssh.sendline('scp %s root@%s:%s/%s%s' % (dbfn,LocalIP,subdir,'db',x))
+                Standard_Reply(ssh,x)
+            except:
+                print "SCP to %s error: " % x + ssh.before[:-1]
+                sys.exit(1)
+
+    ######other nodes handling end#######
+    
+   
+    cmd7 = '%s/avs_clist %s verbose %s/object.* > verbose.local' % (localPWD,localdb,subdir)
+    os.popen(cmd5)
+    os.popen(cmd6)
+    os.popen(cmd7)
+    
+    if action == '-r':
+        print '**Data Fetch finished,enter the handling phase!!**'
+        cmd8 = "awk '/.*orphan.*/' verbose.local"
+        result = os.popen(cmd8).readlines()
+        if result != []:
+            for i in result:
+                goid = i.split()[1].split('=')[-1]
+                cmd9 = '/usr/bin/avs_deletegoid %s' % goid
+                os.popen(cmd9)
+            print '**Attention: All the orphaned GOIDs Cleared**'
+        else:
+            print '**********NO orphaned GOID exist!!!**************'
+        return 1
+    else:
+        print '***Data Fetch finished***'
+        return 1    
+    
+def usage():
+    print "usage: " + "[SYNTAX:] python " + "destrpy_orphaned_goid.py " + "[-r]" + "[10.74.17.105 10.74.17.107]"
+    print "Make sure that file:/home/isa/bss/database/dumpctn are ready in the related folder"
+    sys.exit(1)
+
+
+if __name__ == '__main__':
+    numargs = len(sys.argv) - 1
+    if numargs == 0:
+        usage()
+     
+    else:
+        tag = 0
+        action = ''
+        
+        if sys.argv[1] == '-r':   
+            action = sys.argv[1]
+
+        if action != '':
+            tag = 1
+        IP = []    
+        for i in range(tag,numargs):
+            IP.append(sys.argv[i+1])
+        execute(IP,action)
+    
+    sys.exit(1) 

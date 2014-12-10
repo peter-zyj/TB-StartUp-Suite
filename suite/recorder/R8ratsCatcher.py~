@@ -1,0 +1,111 @@
+#!/usr/bin/env python
+import sys,os,re
+import optparse
+import time
+//zyj: R8 protocl update before the columbia
+
+def execute(vObj, vFile):
+    s1 = "<SetupRecording"
+    s11 = "</SetupRecording>"
+    s2 = "<MoveContent"
+    s22 = "</MoveContent>"
+    s3 = "<CancelRecording"
+    s33 = "</CancelRecording>"
+    s4 = "<ReconstituteContent"
+    s44 = "</ReconstituteContent>"
+    s5 = "<DeleteContent"
+    s55 = "</DeleteContent>"
+    s6 = "<RecordingStatus"
+    s66 = "</RecordingStatus>"
+        
+    keyWord = 'contentObjectId="%s"' % (vObj)
+    T1 = "\d{4}-\d{2}-\d{2}.*?UTC|(?s)"+s1+"(?:[^<]|<(?!SetupRecording))*?"+keyWord+".*?"+s11
+    T2 = "\d{4}-\d{2}-\d{2}.*?UTC|(?s)"+s2+"(?:[^<]|<(?!MoveContent))*?"+keyWord+".*?"+s22
+    T3 = "\d{4}-\d{2}-\d{2}.*?UTC|(?s)"+s3+"(?:[^<]|<(?!CancelRecording))*?"+keyWord+".*?"+s33
+    T4 = "\d{4}-\d{2}-\d{2}.*?UTC|(?s)"+s4+"(?:[^<]|<(?!ReconstituteContent))*?"+keyWord+".*?"+s44
+    T5 = "\d{4}-\d{2}-\d{2}.*?UTC|(?s)"+s5+"(?:[^<]|<(?!DeleteContent))*?"+keyWord+".*?"+s55
+    T6 = "\d{4}-\d{2}-\d{2}.*?UTC|(?s)"+s6+"(?:[^<]|<(?!RecordingStatus))*?"+keyWord+".*?"+s66    
+    
+    r1 = '.{400}%s.*?(?:</SetupRecording>|</DeleteContent>|</RecordingStatus>|</MoveContent>|</CancelRecording>|</ReconstituteContent>)' % (keyWord)
+    
+    
+    f = open(vFile, 'r')    
+    
+    recsvr = None
+    dict = {}
+    recsvr = f.read()
+    reobj = re.compile(r'(?s)%s' % (r1)) 
+    ll = reobj.findall(recsvr)
+    
+    for i in ll:
+        reobj_2 = re.compile(r'(?s)%s|%s|%s|%s|%s|%s' % (T1, T2, T3, T4, T5, T6)) 
+        ll_2 = reobj_2.findall(i)
+        for y in ll_2:
+            dict[ll_2[-2]] = ll_2[-1]
+    
+    timeList = dict.keys()
+    timeList.sort()
+
+
+    for i in range(len(dict)):
+        print timeList[i]
+        print dict[timeList[i]]
+        print "#######################"
+            
+    f.close()
+    return
+    
+    
+   
+if __name__ == '__main__':
+    usage ="""
+example: %prog -i "12345" -f "recsvr.log"
+example: %prog -f "recsvr.log"
+"""
+    parser = optparse.OptionParser(usage)
+
+    parser.add_option("-i", "--ObjID", dest="vObj",
+                      default='Null',action="store",
+                      help="the ObjectID need to search!")
+    parser.add_option("-f", "--FileName", dest="vFile",
+                      default='Null',action="store",
+                      help="the File where do the search!")
+#    parser.add_option("-C", "--Content", dest="contentList",
+#                      default=[],action="append",type="string",metavar="ContentList",
+#                      help="the ContentList, default is empty")
+#    parser.add_option("-a", "--action", dest="vAction",
+#                      default='search',action="store",type="string",metavar="optional param",
+#                      help="search|match are 2 optional choice, match is the default value")
+#    parser.add_option("-i", "--CaseSensitive", dest="vCSdata",
+#                      default="False",action="store_true",
+#                      help="The option switcher for the case sensitivity,default is false")
+#    parser.add_option("-i", "--IP", dest="URL",
+#                      default='None',action="store",type="string",metavar="REC/ACVurl",
+#                      help="the IP address of REC/ACVurl, default is empty")
+#    parser.add_option("-o", "--OptionalAttribute", dest="optionalAttribute",
+#                      default='None',action="store_true",metavar="Opt_switcher",
+#                      help="the swicther on/off of optional Attr in A9, default is empty")
+
+
+    (options, args) = parser.parse_args()
+
+    argc = len(args)
+    if argc != 0:
+        parser.error("incorrect number of arguments")
+        print usage
+    else:
+        if options.vObj != "Null" and options.vFile != "Null":
+            try:
+                result = execute(options.vObj, options.vFile)
+#            for i in result:
+#                print i
+            except Exception,ex:
+                print Exception,':',ex
+
+        elif options.vObj == "Null":
+# jmeter case not covered           cmd = """awk '/SetupRecording/{for(i=1;i<NF;i++){if($i~/contentObjectId="/){print $1$2"::"$i}}}' %s""" % (options.vFile)
+            cmd = """awk '{for(i=1;i<NF+1;i++){if($i~/contentObjectId="/){if(NF>1){print $1$2"::"$i}else{print $1}}}}' %s""" % (options.vFile)
+            printout = os.popen(cmd).read()
+            print printout
+        else:
+            print usage

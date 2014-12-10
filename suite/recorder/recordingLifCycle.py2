@@ -1,0 +1,529 @@
+#!/usr/bin/env python
+import sys,os,re
+import optparse, socket
+import time, httplib, fcntl
+#import R8ratsCatcher
+import pexpect
+import struct
+import cPickle, threading  
+import Queue, logging
+#step5: database printout
+#step2: filter out the logs from recorder
+#step3: filter out the logs from rm
+#step1: time sync btw rm and recorder
+#step4: combine the result in to one recorder by the id
+
+
+
+prompt_firstlogin="Are you sure you want to continue connecting \(yes/no\)\?"
+default_passwd="rootroot"
+prompt_passwd="root@.*'s password:"
+prompt_logined="\[root@.*\]#"
+prompt_percentage=".*100%.*"
+
+def win_get_ip_address():
+    hostname = socket.gethostname()
+    ip = socket.gethostbyname(hostname)
+    return ip
+    
+    
+    
+def linux_get_ip_address(ifname):
+    
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return socket.inet_ntoa(fcntl.ioctl(
+        s.fileno(),
+        0x8915,  # SIOCGIFADDR
+        struct.pack('256s', ifname[:15])
+    )[20:24])
+
+def Standard_Reply_SCP(ssh,IP, pwd=default_passwd):
+    try:
+        #ssh = pexpect.spawn('ssh root@%s' % IP)
+        result = ssh.expect([prompt_firstlogin, prompt_passwd, prompt_logined, pexpect.TIMEOUT, prompt_percentage],timeout=10)
+        #ssh.logfile = sys.stdout                                            # printout in real time
+        ssh.logfile = None
+
+        if result == 0:
+          ssh.sendline('yes')
+          ssh.expect(prompt_passwd)
+          ssh.sendline(pwd)
+          ssh.expect(prompt_percentage)
+        elif result == 1:
+          ssh.sendline(pwd)
+          ssh.expect(prompt_percentage)
+        elif result == 2:
+          pass
+        elif result == 3:
+          print "ssh to %s timeout" %IP
+          sys.exit(0)
+        if result == 4:
+          pass
+        return ssh,result
+    except:
+        print "result is ",result
+        print 'Mismatch BTW default expect or unexpected things happen!'
+        return ssh,result
+        #sys.exit(0)
+
+def Standard_Reply(ssh,IP, pwd=default_passwd):
+    try:
+        result = ssh.expect([prompt_firstlogin, prompt_passwd, prompt_logined, pexpect.TIMEOUT],timeout=10)
+        #ssh.logfile = sys.stdout                                            # printout in real time
+        ssh.logfile = None
+
+        if result == 0:
+            ssh.sendline('yes')
+            try:
+                ssh.expect(prompt_passwd)
+                ssh.sendline(pwd)
+                ssh.expect(prompt_logined)
+            except:
+                print 'no authentication but need record the host info!'
+        elif result == 1:
+             ssh.sendline(pwd)
+             ssh.expect(prompt_logined) 
+        elif result == 2:
+          pass
+        elif result == 3:
+          print "ssh to %s timeout" %IP
+          sys.exit(0)
+        return ssh,result
+    except:
+        result = 'crash'
+        print 'Mismatch BTW default expect or unexpected things happen!!'
+        return ssh,result
+        sys.exit(0)
+
+def startFrecorder(vObjID):
+    #step1: fetch time zone         // return recorderTZ    // UTC+/- 8
+    #step2: fetch the rm ip:port// return recorderIP:recorderPORT
+    #step3: filter out the logs //  recorderLOG
+    try:
+        LocalIP=linux_get_ip_address('eth0')
+    except:
+        LocalIP = win_get_ip_address()
+        print 'windows'
+    LocalDir=os.getcwd()
+    recorderIP = raw_input ('***Please input your recorder IP***\n')
+    
+    ssh = pexpect.spawn('ssh root@%s' % recorderIP)
+    ssh,result = Standard_Reply(ssh,recorderIP, "rootroot")
+    
+    time.sleep(1)
+    ssh.sendline('cp /root/yijun/R8ratsCatcher.py /arroyo/log/.')
+    result = ssh.expect(['.*?cp: *?overwrite.*', prompt_logined])
+    if result == 0:
+        ssh.sendline('y')
+        ssh.expect(prompt_logined)
+    ssh.sendline('cd /arroyo/log/')
+    ssh.expect(prompt_logined)
+    ssh.sendline('python R8ratsCatcher.py -i %s -f recsvr.log | tee R8ratsRecLog' % (vObjID))
+    ssh.expect(prompt_logined, timeout=100)
+    ssh.sendline('date')
+    ssh.expect(prompt_logined)
+    recorderTZ = ssh.before
+    
+    ssh.sendline('netstat -anp | grep CDSRecSvr | grep tcp')
+    ssh.expect(prompt_logined)
+    recorderPORT = ssh.before
+    index = recorderPORT.split().index('LISTEN')
+    recorderPORT = recorderPORT.split()[index-2].split(':')[1]
+    print 'the rec port is::', recorderPORT
+    
+    try:
+        scp = pexpect.spawn('scp root@%s:/arroyo/log/R8ratsRecLog R8ratsRecLogLocal' % (recorderIP))
+#        scp,result = Standard_Reply_Windows_SCP(scp,LocalIP, "rootroot")
+        scp,result = Standard_Reply_SCP(scp,recorderIP, "rootroot")
+        #scp.expect('pass*',timeout=2)
+        #scp.sendline('rootroot')
+        #time.sleep(1)
+    except:
+        print "startFrecorder::scp to %s error: " % LocalIP + scp.before[:-1]
+        sys.exit(1)
+        #print "no Authentication!"
+    
+    if os.path.getsize('R8ratsRecLogLocal') == 0:
+        print "no record in %s, or the recorder is not the correct one" % (recorderIP)
+    else:
+        reTime = r'\d+-\d+-\d+ +\d+:\d+:\d+\.\d+ .*'
+        ss = os.popen('head -n 3 R8ratsRecLogLocal').readlines()
+        ss = ''.join(ss)
+        gCom = re.compile(reTime)
+        timeLine = gCom.findall(ss)[0]
+        if "UTC" in timeLine:
+            recorderTZ = recorderTZ + "::UTC"
+        
+    ssh.close()
+
+
+    return recorderTZ, "%s,%s" %(recorderIP, recorderPORT)
+    
+
+def startFrm(vRecID, vObjID):
+    #step1: fetch time zone         // return rmTZ    // UTC+/- 8
+    #step2: fetch the rm ip         // return rmIP
+    #step3: filter out the logs //  rmLOG
+    #step4: filter out ObjID //  rreturn ObjID | Null
+    try:
+        LocalIP=linux_get_ip_address('eth0')
+    except:
+        LocalIP = win_get_ip_address()
+    LocalDir=os.getcwd()
+    rmIP = raw_input('***Please input your recorder manager IP***\n')
+    
+    ssh = pexpect.spawn('ssh root@%s' % rmIP)
+    ssh,result = Standard_Reply(ssh,rmIP, "cisco")
+    
+    time.sleep(1)
+    ssh.sendline('cd /opt/cisco/usrm/EventLog/')
+    result = ssh.expect(prompt_logined)
+    ssh.sendline('ls -ltr | tail -n 1')
+    result = ssh.expect(prompt_logined)  
+    rmLog = ssh.before.split()[-1]
+
+#<recordingId>(.*)</recordingId> .*?<playbackLocator>cf36c5928643a4a452a8bfb2d8c05ca0</playbackLocator>
+    reRM = r'<playbackLocator>(.*)</playbackLocator>'
+    reRMobj = re.compile(reRM)
+    if vRecID == "Null":
+        ssh.sendline(r"""awk '/.*<playbackLocator>%s</playbackLocator>.*/{print$0}' %s""" % (vObjID, rmLog))
+        ssh.expect(prompt_logined, timeout=100)
+        reRM = r'<recordingId>(.*)</recordingId>.*?<playbackLocator>%s</playbackLocator>' % (vObjID)
+        reRMobj = re.compile(reRM)        
+        vRecID = reRMobj.findall(' '.join(ssh.before))
+    ssh.sendline(r"""awk '/.*(WsSend|WsReqReceived).*%s.*/{print$0"\n************************************\n"}' %s | tee A8ratsRmLog""" % (vRecID, rmLog))
+    ssh.expect(prompt_logined, timeout=100)
+    content = ssh.before
+    mObjID = reRMobj.findall(content)[0].replace('"','')
+    
+    if vObjID == "Null":
+        pass
+    else:
+        if mObjID != vObjID:
+            print "mObjID==",mObjID
+            print "vObjID==",vObjID
+            print "startFrm::the regex failed for the handling"
+        
+    ssh.sendline('date')
+    ssh.expect(prompt_logined)
+    rmTZ = ssh.before
+
+    try:
+        scp = pexpect.spawn('scp root@%s:/opt/cisco/usrm/EventLog/A8ratsRmLog A8ratsRmLogLocal ' % (rmIP))
+        scp,result = Standard_Reply_SCP(scp,rmIP, "cisco")
+
+        #scp.expect('pass*',timeout=2)
+        #scp.sendline('rootroot')
+        #time.sleep(1)
+    except:
+        print "startFrm::scp to %s error: " % LocalIP + scp.before[:-1]
+        sys.exit(1)
+        #print "no Authentication!"
+
+    if os.path.getsize('A8ratsRmLogLocal') == 0:
+        print "no record in %s, or the RM is not the correct one" % (rmIP)
+    else:
+        reTime = r'\d+/\d+/\d+ +\d+:\d+:\d+\.\d+ .*'
+        ss = os.popen('head -n 2 A8ratsRmLogLocal').readlines()
+        ss = ''.join(ss)
+        gCom = re.compile(reTime)
+        timeLine = gCom.findall(ss)[0]
+        if "UTC" in timeLine:
+            rmTZ = rmTZ + "::UTC"      
+        
+    ssh.close()
+
+    return rmTZ, rmIP, mObjID
+
+def combineLogs(recorderTZ, rmTZ):
+    
+    tzZone = {"UTC":"0","CST":"+8","PDT":"-7"}
+    
+    if os.path.getsize('A8ratsRmLogLocal') == 0:
+        print "no record in A8ratsRmLogLocal"
+        frec = open('R8ratsRecLogLocal', 'r')
+        for i in frec.readlines:
+            print i
+        
+        return
+    
+    if os.path.getsize('R8ratsRecLogLocal') == 0:
+        print "no record in R8ratsRecLogLocal"
+        frm = open('A8ratsRmLogLocal', 'r')
+        
+        for i in frm.readlines():
+            print i
+            
+        return
+        
+        
+    remlog = r'(?m)^(\d+/\d+/\d+ +\d+):(\d+):(\d+)\.(\d+) .*$'
+    rerlog = r'(?m)^(\d+-\d+-\d+ +\d+):(\d+):(\d+)\.(\d+) .*$'\
+    
+    cRemlog = re.compile(remlog)
+    cRerlog = re.compile(rerlog)
+    
+    f = open('finalResult', 'w+')
+    frec = open('R8ratsRecLogLocal', 'r')
+    frm = open('A8ratsRmLogLocal', 'r')
+    
+    Lrec = frec.readlines()
+    Lrm = frm.readlines()
+    Lfinal = []
+    timeGap = 0
+    
+    waitTag = ""
+    servBoy = ""
+    
+    Hgap = "0"
+    for tz in  tzZone.keys():
+        if tz in rmTZ:
+            Hgap = tzZone[tz]
+
+
+    servBoy = Lrm[0]
+    action = ""
+    x = 0
+    y = 0
+    for i in range(len(Lrm)):
+        if action == "Done":
+            break
+        for p in range(len(Lrec)):
+#            print "loooooooooooooooop-p:::",p
+#            print "loooooooooooooooop-i:::",i
+#            print "waitTag :::",waitTag 
+#            print "servBoy :::",servBoy
+            if waitTag == "REC":
+                #resultY = cRerlog.findall(y)
+                resultX = cRemlog.findall(servBoy)
+            elif waitTag == 'RM':
+                resultY = cRerlog.findall(servBoy)
+            else:
+                resultY = cRerlog.findall(Lrec[0])
+                resultX = cRemlog.findall(Lrm[0])                
+            print "resultX ==",resultX
+            print "resultY ==",resultY
+            
+            if resultY != [] and resultX != []:
+                # missing the TZ gap
+
+                xSecond = time.mktime(time.strptime(resultX[0][0].replace('/', '-'),"%Y-%m-%d %H"))
+                ySecond = time.mktime(time.strptime(resultY[0][0].replace('/', '-'),"%Y-%m-%d %H"))
+#                xMSecond = time.mktime(time.strptime(resultX[0][1].replace('/', '-'),"%M"))
+#                yMSecond = time.mktime(time.strptime(resultY[0][1].replace('/', '-'),"%M"))
+#                xSSecond = time.mktime(time.strptime(resultX[0][2].replace('/', '-'),"%S"))
+#                ySSecond = time.mktime(time.strptime(resultY[0][2].replace('/', '-'),"%S"))
+#                xsSecond = time.mktime(time.strptime(resultX[0][3].replace('/', '-'),"%f"))
+#                ysSecond = time.mktime(time.strptime(resultY[0][3].replace('/', '-'),"%f"))
+                
+                mYSecond = resultY[0][3]
+                mXSecond = resultX[0][3]
+                strDateY = ':'.join(resultY[0][:-1])
+                strDateX = ':'.join(resultX[0][:-1])
+                xWSecond = time.mktime(time.strptime(strDateX.replace('/', '-'),"%Y-%m-%d %H:%M:%S"))
+                yWSecond = time.mktime(time.strptime(strDateY.replace('/', '-'),"%Y-%m-%d %H:%M:%S"))                
+                
+                if abs(xSecond -ySecond) != abs(int(Hgap))*3600:
+                    print "Time Zone has the Sync. issue!!"
+                  
+                if timeGap == 0:
+                    timeGap = abs(xSecond -ySecond)
+#                print "timeGap=",timeGap
+#                print "xWSecond=",xWSecond
+#                print "yWSecond=",yWSecond
+#                print "mXSecond=",mXSecond
+#                print "mYSecond=",mYSecond
+                
+                if abs(xWSecond -yWSecond) > timeGap:
+                    if xWSecond > yWSecond:
+                        waitTag = 'RM'
+                        Lfinal.append(Lrec[y])
+                        y = y + 1
+                        servBoy = Lrec[y]
+                    else:
+                        waitTag = 'REC'
+                        Lfinal.append(Lrm[x])
+                        x = x + 1
+                        servBoy = Lrm[x]
+                else:
+                    if abs(xWSecond -yWSecond) == timeGap:
+                        if mXSecond > mYSecond:
+                            waitTag = 'RM'
+                            Lfinal.append(Lrec[y])
+                            y = y + 1
+                            servBoy = Lrec[y]
+                        else:
+                            waitTag = 'REC'
+                            Lfinal.append(Lrm[x])                       
+                            x = x + 1
+                            servBoy = Lrm[x]
+                    else:
+                        if xWSecond > yWSecond:
+                            waitTag = 'REC'
+                            Lfinal.append(Lrm[x])
+                            x = x + 1
+                            servBoy = Lrm[x]
+                        else:
+                            waitTag = 'RM'
+                            Lfinal.append(Lrec[y])
+                            y = y + 1
+                            servBoy = Lrec[y] 
+                
+                
+                
+            elif resultY == []:
+                if waitTag == "RM":
+                    Lfinal.append(servBoy)
+                    waitTag = "RM"
+                    y = y + 1
+                    try:
+                        servBoy = Lrec[y]
+                    except:
+                        Lfinal = Lfinal + Lrm[x:]
+                        action = "Done"
+                        break
+            elif resultX == []:
+                if waitTag == "REC":
+                    Lfinal.append(servBoy)
+                    waitTag = "REC"
+                    x = x + 1
+                    try:
+                        servBoy = Lrm[x]
+                    except:
+                        Lfinal = Lfinal + Lrec[y:]
+                        action = "Done"
+                        break
+                    
+                
+#            print '~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~' 
+    strFinal = ''.join(Lfinal)
+    f.write(strFinal)
+    
+    f.close()
+    frec.close()
+    frm.close()
+    
+    
+    
+    
+    
+    
+
+def execute(vRecID, vObjID, vDbIP):
+    conn = httplib.HTTPConnection("%s:8092" % (vDbIP))
+    conn.request("GET", "/srmobjects/_design/dev_AUTO/_view/Everything?stale=false&full_set=true&connection_timeout=60000&skip=0")
+    r1 = conn.getresponse()
+    tt = r1.read()
+
+    if vObjID != "Null":
+        qString = vObjID
+    else:
+        qString = vRecID
+
+    reObj = r'(?m).*%s.*' % (qString)
+    cObj = re.compile(reObj)
+    result = cObj.findall(tt)
+    
+    if result == []:
+        print qString+''+'not exist in the couchbase!!'
+        return 0
+    else:
+        #1.fetch the recID
+        #2.fetch the recordingID
+        for i in result:
+            try:
+                t = i.split(',').index('"%s"' % (qString))
+            except:
+                #not the key record
+                continue
+            
+            if qString == vObjID:
+                vRecID = i.split(',')[t-1]
+            else:
+                vObjID = i.split(',')[t+1]
+            
+            vRecID = vRecID.replace('"','')
+            vObjID = vObjID.replace('"', '')
+            break
+    
+    reObj = r'(?m).*%s.*' % (vRecID)
+    cObj = re.compile(reObj)
+    result = cObj.findall(tt)
+     
+    print '\n***********************************couchbase record start********************\n'
+    for i in result:
+        print i
+    print '\n***********************************couchbase record end**********************\n'
+    print 'recorder ID is ::', vRecID
+    print 'Content Object ID is ::', vObjID
+
+#   start fetch all the logs from recorder and recorder manager
+    if vObjID != "Null" and vRecID != "Null":
+        recorderTZ, recorderIP = startFrecorder(vObjID)
+        rmTZ, rmIP, mObjID = startFrm(vRecID, vObjID)
+    else:
+        rmTZ, rmIP = startFrm(vRecID, vObjID)
+        recorderTZ, recorderIP = startFrecorder(vObjID)
+#   start the handling of the log cross-merge
+    
+    #combineLogs(recorderTZ, rmTZ)
+    
+    
+    
+
+
+if __name__ == '__main__':
+    usage ="""
+this script should stay with R8ratsCatcher.py
+example: %prog  -d couchbaseIP (-recID "12345" | -objID "djqdjoiqu293wqd1u21hd") [-m]
+"""
+    parser = optparse.OptionParser(usage)
+
+    parser.add_option("-r", "--recID", dest="vRecID",
+                      default='Null',action="store",
+                      help="the recorder ID from recorder manager view!")
+    parser.add_option("-o", "--objID", dest="vObjID",
+                      default='Null',action="store",
+                      help="the recording ID from recorder view!")
+    parser.add_option("-d", "--db", dest="vDbIP",
+                      default='Null',action="store",
+                      help="the couchbase IP!")
+    parser.add_option("-m", "--merge", dest="vMerge",
+                      default='False',action="store_true",
+                      help="merge recorder and RM logs")
+#    parser.add_option("-C", "--Content", dest="contentList",
+#                      default=[],action="append",type="string",metavar="ContentList",
+#                      help="the ContentList, default is empty")
+#    parser.add_option("-a", "--action", dest="vAction",
+#                      default='search',action="store",type="string",metavar="optional param",
+#                      help="search|match are 2 optional choice, match is the default value")
+#    parser.add_option("-i", "--CaseSensitive", dest="vCSdata",
+#                      default="False",action="store_true",
+#                      help="The option switcher for the case sensitivity,default is false")
+#    parser.add_option("-i", "--IP", dest="URL",
+#                      default='None',action="store",type="string",metavar="REC/ACVurl",
+#                      help="the IP address of REC/ACVurl, default is empty")
+#    parser.add_option("-o", "--OptionalAttribute", dest="optionalAttribute",
+#                      default='None',action="store_true",metavar="Opt_switcher",
+#                      help="the swicther on/off of optional Attr in A9, default is empty")
+
+
+    (options, args) = parser.parse_args()
+
+    argc = len(args)
+    if argc != 0:
+        print argc
+        parser.error("incorrect number of arguments")
+        print usage
+    else:
+        if options.vMerge == True:
+            combineLogs("Null", "Null")
+            sys.exit(1)
+        
+        if ((options.vRecID != "Null") ^ (options.vObjID != "Null")) and options.vDbIP != "Null":
+            result = execute(options.vRecID, options.vObjID, options.vDbIP)
+#            for i in result:
+#                print i
+
+        else:
+            print usage

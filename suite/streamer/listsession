@@ -1,0 +1,15 @@
+#!/bin/tcsh
+#set total
+#set i
+./AVSDBUtil << EOF >& temp-session
+6
+2
+0
+EOF
+
+set Total = `grep Name temp-session|awk '{print $3}'|uniq |wc -l |awk '{print $1}'` 
+echo "Total session:"
+#set i=`expr $Total / 2`
+echo $Total
+grep Name temp-session|awk '{print $3}'|uniq|head -$Total > all-session
+

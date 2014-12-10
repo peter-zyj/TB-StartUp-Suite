@@ -1,0 +1,22 @@
+Start from Scratch now.......
+&&&&&&&&&&&&&&&&&COMMON PART&&&&&&&&&&&&&&&&&&&&
+Action:Do U want to Common install the tool backgroud(eg: pexpect) Yes|No?INFO:Data transfer common/pexpect-2.3.tar ongoing.......
+local IP is  72.163.255.62
+windows IP handled specially
+IP is  172.22.102.134
+INFO:Data transfer common/coredump.sh ongoing.......
+local IP is  72.163.255.62
+windows IP handled specially
+IP is  172.22.102.134
+INFO:Data transfer common/lrzsz-0.12.20-22.1.x86_64.rpm ongoing.......
+local IP is  10.140.8.72
+windows IP handled specially
+IP is  172.22.102.134
+INFO:Data transfer common/orphanedGoid.sh ongoing.......
+local IP is  10.140.8.72
+windows IP handled specially
+IP is  172.22.102.134
+INFO:Module and Startup Script Installing ongoing.......
+local IP is  72.163.255.62
+IP is  172.22.102.134
+&&&&&&&&&&&&&&&&&&FINISHED&&&&&&&&&&&&&&&&&&&&&
